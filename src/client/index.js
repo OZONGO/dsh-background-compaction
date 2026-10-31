@@ -20,7 +20,7 @@ window.__ModuleLoader__.load({
     // Visible build stamp: the settings panel is the only surface that can tell
     // which client bundle the renderer actually loaded, and Electron keeps the
     // previous bundle until the window itself reloads.
-    const BUILD = 'b5'
+    const BUILD = 'b6'
     const NS = 'background-compaction'
 
     /* ------------------------------------------------------------------ */
@@ -208,19 +208,11 @@ window.__ModuleLoader__.load({
      * @param {object} ctx - client plugin context.
      * @returns {Function} React component.
      */
-    function makeSettingsPage(ctx, mountError) {
+    function makeSettingsPage(ctx) {
       const t = ctx.locale.bind(NS)
-      // `ctx.remote.<namespace>` is a Cordis service accessor and requires
-      // `remote.<namespace>` in this plugin's static `inject` table — which is a
-      // chicken-and-egg here, because this very plugin mounts the namespace.
-      // `ctx.get()` resolves the same instance without that declaration.
-      const api = () => {
-        const namespace = ctx.get(REMOTE_SERVICE)
-        if (namespace === undefined) {
-          throw new Error(mountError?.message ?? 'settings remote is not mounted')
-        }
-        return namespace
-      }
+      // `ctx` here is the child context opened by `apply()`, which injects
+      // `remote.<namespace>`, so this accessor resolves.
+      const api = () => ctx.remote[REMOTE_NAMESPACE]
 
       return function SettingsPage() {
         const [settings, setSettings] = useState(undefined)
@@ -539,24 +531,23 @@ window.__ModuleLoader__.load({
     /* ------------------------------------------------------------------ */
 
     /**
-     * @param {object} ctx - client plugin context.
+     * Register the settings page inside a context that has the mounted
+     * namespace injected.
+     *
+     * `ctx.remote.<namespace>` is a Cordis service accessor: reading it requires
+     * `remote.<namespace>` in the reading context's inject table. The plugin
+     * that *mounts* the namespace cannot declare it statically (deadlock), so —
+     * exactly like `dsh-experimental-client-ui-cot-translation` — it mounts
+     * first and then opens a child context that injects the namespace.
+     *
+     * @param {object} child - context that has `remote.<namespace>` injected.
+     * @param {(key: string) => string} t - translator.
+     * @returns {object} the slot registration handle.
      */
-    async function apply(ctx) {
-      const t = ctx.locale.bind(NS)
-      ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'background-compaction: dictionaries')
-      ctx.effect(() => installStyles(), 'background-compaction: styles')
-      // Mount the namespace before the page can render; a failure is surfaced in
-      // the page instead of removing it.
-      let mountError
-      try {
-        await ctx.remote.$mount(REMOTE_CONTRIBUTION)
-      } catch (error) {
-        mountError = error
-        console.warn('[dsh-background-compaction] settings remote mount failed', error)
-      }
-      const SettingsPage = makeSettingsPage(ctx, mountError)
-      ctx.slots.inject('settings.section', () =>
-        ctx.slots.register(
+    function registerPage(child, t) {
+      const SettingsPage = makeSettingsPage(child)
+      return child.slots.inject('settings.section', () =>
+        child.slots.register(
           {
             name: 'settings.section',
             id: 'background-compaction',
@@ -566,6 +557,28 @@ window.__ModuleLoader__.load({
           SettingsPage,
         ),
       )
+    }
+
+    /**
+     * @param {object} ctx - client plugin context.
+     */
+    async function apply(ctx) {
+      const t = ctx.locale.bind(NS)
+      ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'background-compaction: dictionaries')
+      ctx.effect(() => installStyles(), 'background-compaction: styles')
+      const unmountRemote = await ctx.remote.$mount(REMOTE_CONTRIBUTION)
+      const ui = ctx.inject([REMOTE_SERVICE, 'slots', 'locale'], (child) => registerPage(child, t))
+      try {
+        await ui
+      } catch (error) {
+        await ui.dispose()
+        await unmountRemote()
+        throw error
+      }
+      return async () => {
+        await ui.dispose()
+        await unmountRemote()
+      }
     }
 
     const inject = ['slots', 'locale', 'remote']

@@ -48,15 +48,16 @@ test('the client mounts the same package identity', () => {
   assert.match(CLIENT_SOURCE, /ctx\.remote\.\$mount\(REMOTE_CONTRIBUTION\)/)
 })
 
-test('the client resolves the mounted namespace without a static inject entry', () => {
+test('the client injects the mounted namespace in a child context', () => {
   // `ctx.remote.<ns>` is a Cordis service accessor that requires `remote.<ns>`
-  // in the plugin's static inject table — impossible here, because this very
-  // plugin is what mounts the namespace. `ctx.get()` resolves the same instance
-  // without that declaration (verified against Cordis: nested Service accessors
-  // throw `cannot get property ... without inject`, `ctx.get` does not).
+  // in the reading context's inject table. The plugin that mounts the namespace
+  // cannot declare it statically (deadlock), so it mounts first and then opens
+  // a child context that injects it — the pattern used by
+  // `dsh-experimental-client-ui-cot-translation`.
   assert.match(CLIENT_SOURCE, /const REMOTE_SERVICE = `remote\.\$\{REMOTE_NAMESPACE\}`/)
-  assert.match(CLIENT_SOURCE, /ctx\.get\(REMOTE_SERVICE\)/)
-  assert.doesNotMatch(CLIENT_SOURCE, /ctx\.remote\?\.backgroundCompaction/)
+  assert.match(CLIENT_SOURCE, /ctx\.inject\(\[REMOTE_SERVICE, 'slots', 'locale'\]/)
+  assert.match(CLIENT_SOURCE, /ctx\.remote\[REMOTE_NAMESPACE\]/)
+  assert.doesNotMatch(CLIENT_SOURCE, /ctx\.get\(REMOTE_SERVICE\)/)
 })
 
 test('the client bundle is a ModuleLoader factory with the plugin exports', () => {
