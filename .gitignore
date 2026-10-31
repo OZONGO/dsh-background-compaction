@@ -1,3 +1,6 @@
 node_modules/
 .DS_Store
 *.log
+
+# Design notes stay local; not part of the published plugin.
+docs/
