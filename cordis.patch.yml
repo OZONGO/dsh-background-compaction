@@ -1,0 +1,34 @@
+# dsh-background-compaction bundle patch.
+#
+# `ctx.compaction` accepts exactly one provider per context, and a duplicate
+# `provide` throws at load time. Replacing the shipped engine therefore means
+# disabling its Loader row and inserting ours, not mounting beside it.
+#
+# The row id comes from `@deepseek-ai/dsh-base`'s patch:
+#   - id: compaction-basic
+#     name: '@deepseek-ai/dsh-compaction-basic'
+#
+# Loader dialect: a patch item with an `id` and no `insert` targets that row.
+# Fields replace the row's fields, so only the fields being changed are listed.
+- id: compaction-basic
+  disabled: true
+
+- insert:
+    - id: background-compaction
+      name: 'dsh-background-compaction'
+      config:
+        background:
+          # Fraction of thresholdTokens that starts background generation.
+          startRatio: 0.85
+          # Verbatim tail cap, also relative to thresholdTokens.
+          tailRatio: 0.5
+          # Minimum useful summarized span, relative to thresholdTokens.
+          minShadowedRatio: 0.1
+          # Skip generation when the provider cache is probably cold.
+          cacheWarmMs: 300000
+          # Maximum age of a ready summary.
+          holdTtlMs: 900000
+          # Sessions that may hold a summary at once.
+          maxSessions: 8
+          # Consecutive failures before background generation stops.
+          maxFailures: 2
