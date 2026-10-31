@@ -20,7 +20,7 @@ window.__ModuleLoader__.load({
     // Visible build stamp: the settings panel is the only surface that can tell
     // which client bundle the renderer actually loaded, and Electron keeps the
     // previous bundle until the window itself reloads.
-    const BUILD = 'b3'
+    const BUILD = 'b4'
     const NS = 'background-compaction'
 
     /* ------------------------------------------------------------------ */
