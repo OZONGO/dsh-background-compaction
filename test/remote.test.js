@@ -55,7 +55,10 @@ test('the client injects the mounted namespace in a child context', () => {
   // a child context that injects it — the pattern used by
   // `dsh-experimental-client-ui-cot-translation`.
   assert.match(CLIENT_SOURCE, /const REMOTE_SERVICE = `remote\.\$\{REMOTE_NAMESPACE\}`/)
-  assert.match(CLIENT_SOURCE, /ctx\.inject\(\[REMOTE_SERVICE, 'slots', 'locale'\]/)
+  assert.match(CLIENT_SOURCE, /ctx\.inject\(\[REMOTE_SERVICE, 'remote\.session', 'slots', 'locale'\]/)
+  // The page lists the model catalog, so the child must also inject
+  // `remote.session`: reading it without that entry throws.
+  assert.match(CLIENT_SOURCE, /ctx\.remote\.session\.modelCatalog\(\)/)
   assert.match(CLIENT_SOURCE, /ctx\.remote\[REMOTE_NAMESPACE\]/)
   assert.doesNotMatch(CLIENT_SOURCE, /ctx\.get\(REMOTE_SERVICE\)/)
 })

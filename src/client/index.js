@@ -20,7 +20,7 @@ window.__ModuleLoader__.load({
     // Visible build stamp: the settings panel is the only surface that can tell
     // which client bundle the renderer actually loaded, and Electron keeps the
     // previous bundle until the window itself reloads.
-    const BUILD = 'b6'
+    const BUILD = 'b7'
     const NS = 'background-compaction'
 
     /* ------------------------------------------------------------------ */
@@ -218,6 +218,7 @@ window.__ModuleLoader__.load({
         const [settings, setSettings] = useState(undefined)
         const [catalog, setCatalog] = useState(undefined)
         const [catalogFailed, setCatalogFailed] = useState(false)
+        const [catalogError, setCatalogError] = useState('')
         const [settingsFile, setSettingsFile] = useState('')
         const [status, setStatus] = useState({ tone: 'idle', text: '' })
         const [menuOpen, setMenuOpen] = useState(false)
@@ -249,8 +250,10 @@ window.__ModuleLoader__.load({
               const value = unwrap(await ctx.remote.session.modelCatalog(), 'catalog unavailable')
               if (cancelled) return
               setCatalog(Array.isArray(value?.groups) ? value.groups : [])
-            } catch {
-              if (!cancelled) setCatalogFailed(true)
+            } catch (error) {
+              if (cancelled) return
+              setCatalogFailed(true)
+              setCatalogError(String(error?.message ?? error))
             }
           })()
           return () => {
@@ -435,6 +438,13 @@ window.__ModuleLoader__.load({
               ? h(
                   'div',
                   { className: 'bgc-manual' },
+                  // The reason is shown, not swallowed: an inject-table mistake
+                  // and a real catalog outage look identical otherwise.
+                  h(
+                    'div',
+                    { className: 'bgc-hint', style: { width: '100%' } },
+                    catalogError.length > 0 ? `${t('modelUnavailable')} (${catalogError})` : t('modelUnavailable'),
+                  ),
                   h('input', {
                     placeholder: t('provider'),
                     value: manualPair?.provider ?? pair.provider,
@@ -567,7 +577,12 @@ window.__ModuleLoader__.load({
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'background-compaction: dictionaries')
       ctx.effect(() => installStyles(), 'background-compaction: styles')
       const unmountRemote = await ctx.remote.$mount(REMOTE_CONTRIBUTION)
-      const ui = ctx.inject([REMOTE_SERVICE, 'slots', 'locale'], (child) => registerPage(child, t))
+      // `remote.session` is required because the page lists the model catalog.
+      // Every `remote.<ns>` read must appear in the reading context's inject
+      // table; the child is the first context allowed to declare it.
+      const ui = ctx.inject([REMOTE_SERVICE, 'remote.session', 'slots', 'locale'], (child) =>
+        registerPage(child, t),
+      )
       try {
         await ui
       } catch (error) {
