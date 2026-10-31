@@ -271,7 +271,7 @@ Subagents (`delegationDepth > 0`) do **not** precompute in the background; they 
 ## 8. Development
 
 ```bash
-npm test          # 95 cases: pure functions + real Cordis context + real-Session swap
+npm test          # 102 cases: pure functions + real Cordis context + real-Session swap
 ```
 
 Highlights:
@@ -283,12 +283,37 @@ Highlights:
 
 For local development the bare `@deepseek-ai/*` specifiers need a link to the DSH installation:
 
-```bash
-mkdir -p node_modules
-ln -s "<DSH app>/resources/app/node_modules/@deepseek-ai" node_modules/@deepseek-ai
+```powershell
+New-Item -ItemType Junction `
+  -Path "node_modules\@deepseek-ai" `
+  -Target "<DSH app>\resources\app\node_modules\@deepseek-ai"
 ```
 
-(At runtime DSH's overlay resolver handles this; the link is only for local tests.)
+### 8.1 Link the package into the profile — never copy it
+
+Git Bash's `ln -s` **degrades to a copy** for directories on Windows unless
+`MSYS=winsymlinks:nativestrict` is set. A copy is a frozen snapshot: the plugin
+still loads and still logs, but no later edit ever reaches the running process,
+which makes for a very misleading debugging session.
+
+Use a junction (or `pnpm add file:<path>`, which links correctly):
+
+```powershell
+New-Item -ItemType Junction `
+  -Path "$HOME\.dsh\profiles\desktop\node_modules\dsh-background-compaction" `
+  -Target "E:\AI\workspace\dsh-plugin\dsh-background-compaction"
+```
+
+---
+
+## 9. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `cannot get property "remote.<ns>" without inject` in the settings page | the renderer is still running an old bundle | quit DSH Desktop completely and reopen; the `build bX` line at the bottom of the page names the live bundle |
+| Code changed but behaviour and logs did not | the profile entry is a **copy**, not a link | see §8.1 |
+| `settings remote is not mounted` | `ctx.remote.$mount` failed | check the host log for `settings remote unavailable` |
+| `/bcompact` answers "not enough history" | less than 512 tokens of compactable span | add a couple of turns or read a file |
 
 ---
 

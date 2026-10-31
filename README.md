@@ -273,7 +273,7 @@ background-compaction: summarize miss …   指纹没命中，回退真实调用
 ## 8. 开发
 
 ```bash
-npm test          # 95 个用例：纯函数 + 真实 Cordis 上下文 + 真实 Session 换入
+npm test          # 102 个用例：纯函数 + 真实 Cordis 上下文 + 真实 Session 换入
 ```
 
 测试要点：
@@ -281,16 +281,44 @@ npm test          # 95 个用例：纯函数 + 真实 Cordis 上下文 + 真实 
 - `test/spec.test.js` —— 200k 窗口的阈值必须等于 **68928**（锁死阈值数学）
 - `test/swap.test.js` —— 用**真实的 `@deepseek-ai/dsh-session` Session** 跑完整换入，断言"模型调用次数不增加"
 - `test/integration.test.js` —— 真实 Cordis `Context` + 真实 `BasicCompactionEngine` 父类
+- `test/remote.test.js` —— 客户端内联的 Remote 契约必须与宿主模块一致
 - `test/settings.test.js` —— 原子写、损坏文件容错、未知键保留
 
-本地开发时为了让裸包名解析到 DSH 自带的 `@deepseek-ai/*`，需要：
+### 8.1 把包链进 profile 时**必须用真链接**
 
-```bash
-mkdir -p node_modules
-ln -s "<DSH app>/resources/app/node_modules/@deepseek-ai" node_modules/@deepseek-ai
+Git Bash 的 `ln -s` 在目录上会**退化成复制**（Windows 上除非启用 `MSYS=winsymlinks:nativestrict`）。
+复制会得到一个冻结的快照：之后所有代码改动都不会生效，而且症状极其误导 ——
+插件能加载、日志正常、只有新代码不出现。
+
+用 PowerShell 建目录联接（junction）：
+
+```powershell
+New-Item -ItemType Junction `
+  -Path "$HOME\.dsh\profiles\desktop\node_modules\dsh-background-compaction" `
+  -Target "E:\AI\workspace\dsh-plugin\dsh-background-compaction"
 ```
 
-（运行时由 DSH 的 overlay 解析器负责，不需要这一步。）
+或者直接用 `pnpm add file:<path>`（pnpm 自己会建正确的链接）。
+
+本地跑测试时同理，`node_modules/@deepseek-ai` 也必须是**链接**而不是复制 ——
+否则运行时会加载第二份 DSH 包，得到不同的 `Service` 类对象：
+
+```powershell
+New-Item -ItemType Junction `
+  -Path "node_modules\@deepseek-ai" `
+  -Target "<DSH app>\resources\app\node_modules\@deepseek-ai"
+```
+
+---
+
+## 9. 排错
+
+| 症状 | 原因 | 处理 |
+|---|---|---|
+| 设置页报 `cannot get property "remote.<ns>" without inject` | 渲染进程还在跑旧 bundle | 完全退出 DSH Desktop 再打开；页面底部的 `build bX` 告诉你跑的是哪一版 |
+| 改了代码但行为没变、日志也没有新行 | profile 里是**拷贝**而不是链接 | 见 §8.1，改成 junction |
+| 设置页报 `settings remote is not mounted` | `ctx.remote.$mount` 失败 | 看宿主日志里 `settings remote unavailable` 那一行 |
+| `/bcompact` 回"历史太短" | 可压缩区间不足 512 token | 多聊两轮或读一个文件 |
 
 ---
 
