@@ -7,9 +7,12 @@
  *
  * Layout: `<dsh home>/background-compaction/config.json`
  *
- * Precedence: settings file > YAML `config` > built-in defaults. Only three
- * keys are written by the settings page, but the file accepts any key that the
- * engine understands, so a power user can pin `startRatio` by hand.
+ * Precedence: settings file > YAML `config` > built-in defaults. A key only
+ * counts as "set" when the file actually carries it, so a YAML `background`
+ * value stays in force until the settings page writes that same key. The file
+ * only ever contains the keys this plugin writes, plus unknown keys that were
+ * already there (preserved verbatim so a hand edit or a future version is not
+ * silently lost).
  *
  * Writes are atomic (`tmp` → `fsync` → `rename` → `fsync(dir)`) so a crash or a
  * concurrent read never observes a half-written file. `dsh-pet` writes its
@@ -32,6 +35,9 @@ export const SETTINGS_DEFAULTS = Object.freeze({
   summarizationModel: Object.freeze({ provider: '', model: '' }),
   maxFailures: 2,
 })
+
+/** Keys this plugin owns; everything else in the file is preserved untouched. */
+export const SETTINGS_FIELDS = Object.freeze(Object.keys(SETTINGS_DEFAULTS))
 
 /** Raised when a settings update is rejected before touching disk. */
 export class SettingsValidationError extends Error {
@@ -95,13 +101,14 @@ export function normalizeSettings(patch) {
 /**
  * Merge a stored file over the defaults, ignoring unknown keys.
  * @param {unknown} raw - parsed file contents.
- * @returns {{settings: object, extra: object}} normalized settings plus unrecognized keys.
+ * @returns {{settings: object, extra: object, explicit: Set<string>}} normalized settings, unrecognized keys, and the keys the file actually carries.
  */
 function mergeFile(raw) {
   const source = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
   const { $schema, autoTriggerRatio, summarizationModel, maxFailures, ...extra } = source
   const settings = normalizeSettings({ autoTriggerRatio, summarizationModel, maxFailures })
-  return { settings, extra }
+  const explicit = new Set(SETTINGS_FIELDS.filter((field) => Object.hasOwn(source, field)))
+  return { settings, extra, explicit }
 }
 
 /**
@@ -151,6 +158,8 @@ export class SettingsStore {
   #settings = { ...SETTINGS_DEFAULTS, summarizationModel: { ...SETTINGS_DEFAULTS.summarizationModel } }
   /** @type {object} */
   #extra = {}
+  /** @type {Set<string>} keys the file carries, i.e. keys that override YAML. */
+  #explicit = new Set()
   /** @type {Array<(settings: object) => void>} */
   #listeners = new Set()
 
@@ -165,6 +174,19 @@ export class SettingsStore {
   /** @returns {string} absolute settings file path. */
   get file() {
     return this.#file
+  }
+
+  /**
+   * Whether the stored file explicitly sets a field.
+   *
+   * The engine uses this to let YAML defaults stay in force until the settings
+   * page (or a hand edit) actually writes the key.
+   *
+   * @param {string} field - one of {@link SETTINGS_FIELDS}.
+   * @returns {boolean} `true` when the file carries the key.
+   */
+  has(field) {
+    return this.#explicit.has(field)
   }
 
   /**
@@ -189,6 +211,7 @@ export class SettingsStore {
       const merged = mergeFile(parsed)
       this.#settings = merged.settings
       this.#extra = merged.extra
+      this.#explicit = merged.explicit
       return { ok: true }
     } catch (error) {
       return { ok: false, error }
@@ -218,6 +241,8 @@ export class SettingsStore {
   /**
    * Validate, persist, and publish a settings patch.
    *
+   * Only the keys the caller actually passes are marked explicit and written, so
+   * a page that touches one field never silently pins the other two over YAML.
    * The in-memory value only changes after the write succeeds, so a failed save
    * leaves the running engine on the previous, known-good settings.
    *
@@ -230,9 +255,13 @@ export class SettingsStore {
       summarizationModel: patch?.summarizationModel ?? this.#settings.summarizationModel,
       maxFailures: patch?.maxFailures ?? this.#settings.maxFailures,
     })
-    const payload = JSON.stringify({ $schema: SETTINGS_SCHEMA, ...this.#extra, ...candidate }, null, 2)
-    await writeAtomic(this.#file, `${payload}\n`)
+    const explicit = new Set(this.#explicit)
+    for (const field of SETTINGS_FIELDS) if (Object.hasOwn(patch ?? {}, field)) explicit.add(field)
+    const payload = { $schema: SETTINGS_SCHEMA, ...this.#extra }
+    for (const field of SETTINGS_FIELDS) if (explicit.has(field)) payload[field] = candidate[field]
+    await writeAtomic(this.#file, `${JSON.stringify(payload, null, 2)}\n`)
     this.#settings = candidate
+    this.#explicit = explicit
     for (const listener of this.#listeners) {
       try {
         listener(this.get())

@@ -62,21 +62,27 @@ export function selectRange(session, measurement, spec, background, options = {}
   const nodes = session.surface.nodes
   if (!Array.isArray(nodes) || nodes.length < 2) return { skip: RANGE_SKIP.EMPTY }
 
-  // Surface node 0 is the system prompt; it is never compacted.
+  // Surface node 0 is the system prompt when the session has one; it is never
+  // compacted. A surface without a system head starts at node 0, exactly like
+  // the base engine's `selectCompactableRange`.
+  const firstIndex = session.eventAt(nodes[0])?.type === 'system/message' ? 1 : 0
   let lastUserIndex = -1
-  for (let index = nodes.length - 1; index > 0; index -= 1) {
+  for (let index = nodes.length - 1; index >= firstIndex; index -= 1) {
     if (session.eventAt(nodes[index])?.type === 'user/message') {
       lastUserIndex = index
       break
     }
   }
-  if (lastUserIndex <= 0) return { skip: RANGE_SKIP.NO_USER }
+  if (lastUserIndex < 0) return { skip: RANGE_SKIP.NO_USER }
+  // Nothing precedes the latest user message: there is no completed turn to
+  // summarize, which is "history is too short", not "no safe cut point".
+  if (lastUserIndex <= firstIndex) return { skip: RANGE_SKIP.TOO_SMALL }
 
   let endIndex = lastUserIndex - 1
-  while (endIndex > 0 && !toolPairingBalancedAfter(session, nodes[endIndex])) endIndex -= 1
-  if (endIndex <= 0) return { skip: RANGE_SKIP.UNBALANCED }
+  while (endIndex >= firstIndex && !toolPairingBalancedAfter(session, nodes[endIndex])) endIndex -= 1
+  if (endIndex < firstIndex) return { skip: RANGE_SKIP.UNBALANCED }
 
-  let startIndex = 1
+  let startIndex = firstIndex
   while (startIndex < endIndex && !toolPairingBalancedBefore(session, nodes[startIndex])) startIndex += 1
   if (startIndex >= endIndex) return { skip: RANGE_SKIP.UNBALANCED }
 

@@ -101,6 +101,20 @@ test('refuses an empty or single-node surface', () => {
   assert.equal(selectRange(onlySystem, measure(onlySystem, tokens()), spec, background).skip, RANGE_SKIP.EMPTY)
 })
 
+test('reports "too short" when no turn precedes the latest user message', () => {
+  const session = makeSession({ events: [events.system(0, 'sys'), events.user(1, 'only prompt')] })
+  assert.equal(selectRange(session, measure(session, tokens()), spec, background).skip, RANGE_SKIP.TOO_SMALL)
+})
+
+test('starts at node 0 when the surface has no system head', () => {
+  const session = makeSession({
+    events: [events.user(0, 'turn 1'), events.assistant(1, 'answer 1'), events.user(2, 'turn 2')],
+  })
+  const range = selectRange(session, measure(session, tokens()), spec, background)
+  assert.equal(range.start, 0)
+  assert.deepEqual(range.seqs, [0, 1])
+})
+
 test('refuses a surface without a user message', () => {
   const session = makeSession({ events: [events.system(0, 'sys'), events.assistant(1, 'hello')] })
   assert.equal(selectRange(session, measure(session, tokens()), spec, background).skip, RANGE_SKIP.NO_USER)

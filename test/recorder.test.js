@@ -30,13 +30,23 @@ test('describeSwap captures roles, sizes, and heads of the derived request', () 
   const session = swappedSession()
   const snapshot = describeSwap(
     session,
-    { startSeq: 10, endSeq: 20, shadowedTokenCount: 4321, summary: [{ type: 'text', text: 'x'.repeat(120) }] },
-    { tailTokens: 55 },
+    {
+      startSeq: 10,
+      summarySeq: 11,
+      endSeq: 20,
+      shadowedRange: { start: 4, end: 8 },
+      shadowedTokenCount: 4321,
+      summary: [{ type: 'text', text: 'x'.repeat(120) }],
+    },
+    { tailTokens: 55, shadowedTokens: 4000 },
     { origin: 'auto', thresholdTokens: 68928, totalTokens: 70000 },
   )
   assert.equal(snapshot.origin, 'auto')
-  assert.deepEqual(snapshot.range, { start: 10, end: 20 })
-  assert.equal(snapshot.shadowedTokens, 4321)
+  // `startSeq`/`endSeq` name the compaction marker events; the replaced span is
+  // `shadowedRange`, which is what an acceptance check has to look at.
+  assert.deepEqual(snapshot.range, { start: 4, end: 8 })
+  assert.equal(snapshot.shadowedTokens, 4000, 'route-priced span, the same unit as tailTokens')
+  assert.equal(snapshot.shadowedTokenCount, 4321, "the engine's durable heuristic accounting")
   assert.equal(snapshot.summaryChars, 120)
   assert.equal(snapshot.tailTokens, 55)
   assert.equal(snapshot.messageCount, 4)
@@ -46,14 +56,25 @@ test('describeSwap captures roles, sizes, and heads of the derived request', () 
   assert.equal(snapshot.messages[2].head, 'continue')
 })
 
+test('describeSwap falls back to the engine count without a held measurement', () => {
+  const session = swappedSession()
+  const snapshot = describeSwap(
+    session,
+    { startSeq: 1, summarySeq: 2, endSeq: 3, shadowedRange: { start: 1, end: 2 }, shadowedTokenCount: 77, summary: [] },
+    {},
+    { origin: 'auto', thresholdTokens: 1000, totalTokens: 900 },
+  )
+  assert.equal(snapshot.shadowedTokens, 77)
+})
+
 test('writeSwapSnapshot lands one file and no temporary residue', async (t) => {
   const fixture = await temporaryDirectory()
   t.after(fixture.cleanup)
   const session = swappedSession()
   const snapshot = describeSwap(
     session,
-    { startSeq: 1, endSeq: 2, shadowedTokenCount: 10, summary: [] },
-    { tailTokens: 0 },
+    { startSeq: 1, summarySeq: 2, endSeq: 3, shadowedRange: { start: 1, end: 2 }, shadowedTokenCount: 10, summary: [] },
+    { tailTokens: 0, shadowedTokens: 10 },
     { origin: 'bcompact', thresholdTokens: 1000, totalTokens: 900 },
   )
   const written = await writeSwapSnapshot(fixture.directory, snapshot)

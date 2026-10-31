@@ -108,7 +108,7 @@ Command handlers run outside any turn, so they cannot compact synchronously (`co
 |---|---|---|
 | Auto trigger ratio | 0.1 – 0.99 | Starts background generation at `thresholdTokens × ratio`; default 0.85 |
 | Summarization model | provider / model, or "follow the conversation" | Defaults to the model the conversation is using |
-| Failure circuit breaker | 0 – 10 | Stops background generation after this many consecutive failures, until one compaction succeeds |
+| Failure circuit breaker | 0 – 10 | Stops background generation after this many consecutive failures; one probe is allowed after the cooldown (5 min by default) and a success clears the count |
 
 Settings live in `~/.dsh/background-compaction/config.json` and can be edited by hand:
 
@@ -143,8 +143,9 @@ Evidence file `~/.dsh/background-compaction/last-swap.json`:
 ```json
 {
   "origin": "bcompact",
-  "range": { "start": 4, "end": 5 },
+  "range": { "start": 4, "end": 88 },
   "shadowedTokens": 41230,
+  "shadowedTokenCount": 40120,
   "tailTokens": 4310,
   "messages": [
     { "role": "system", "chars": 1180, "head": "You are a coding agent…" },
@@ -156,6 +157,9 @@ Evidence file `~/.dsh/background-compaction/last-swap.json`:
 ```
 
 `messages` is `session.deriveMessages()` taken **after** the commit. The surface is a pure projection, so this is exactly what the next turn sends.
+
+> `range` is the **replaced surface span** (`result.shadowedRange`), not the seq of the `compaction/start` marker.
+> `shadowedTokens` shares its unit with `tailTokens` (route pricing); `shadowedTokenCount` is the heuristic count the engine writes to the durable log.
 
 Log markers:
 
@@ -223,7 +227,9 @@ A summary is only used while the prefix still matches; otherwise it is discarded
 | tail exceeds `tailRatio × thresholdTokens` | discard |
 | older than `holdTtlMs` | discard |
 | unmatched `compaction/start` exists | do not start |
-| consecutive failures ≥ limit | stop background generation |
+| unmatched `compaction/start` predates `session/end-seed` | stale marker from an earlier process lifecycle — **not** a lock |
+| consecutive failures ≥ limit | stop background generation until `failureCooldownMs` lets one probe through |
+| the swap hits another compaction's lock (`busy`) | keep the summary and retry at the next step boundary |
 
 In addition, any `compaction/start` (including `/compact` and overflow recovery) **aborts** an in-flight summary immediately.
 
@@ -242,13 +248,14 @@ In addition, any `compaction/start` (including `/compact` and overflow recovery)
     # summarizationProvider, summarizationModel, maxTokens,
     # compactionRetries, maxOverflowRetries, modelPolicies, auto
     background:
-      startRatio: 0.85        # overridden by the settings page
+      startRatio: 0.85        # overridden once the settings page writes autoTriggerRatio
       tailRatio: 0.5          # verbatim tail cap, relative to thresholdTokens
       minShadowedRatio: 0.1   # lower bound for the summarized span
       cacheWarmMs: 300000     # cold-cache gate
       holdTtlMs: 900000       # maximum age of a ready summary
       maxSessions: 8          # sessions that may hold a summary
-      maxFailures: 2          # overridden by the settings page
+      maxFailures: 2          # overridden once the settings page writes maxFailures
+      failureCooldownMs: 300000  # half-open probe delay once the breaker is open
 ```
 
 ### 6.2 Subagents
@@ -271,7 +278,7 @@ Subagents (`delegationDepth > 0`) do **not** precompute in the background; they 
 ## 8. Development
 
 ```bash
-npm test          # 102 cases: pure functions + real Cordis context + real-Session swap
+npm test          # 116 cases: pure functions + real Cordis context + real-Session swap
 ```
 
 Highlights:

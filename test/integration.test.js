@@ -10,14 +10,16 @@
 
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test, { after } from 'node:test'
 
 import { Context } from '@deepseek-ai/cordis'
+import { ManualCompactionError } from '@deepseek-ai/dsh-compaction'
 
 import { BackgroundCompactionEngine } from '../src/host/engine.js'
-import { fingerprint } from '../src/host/input.js'
+import { buildSummarizationInput, fingerprint } from '../src/host/input.js'
 import { events, makeSession } from './helpers.js'
 
 // The engine resolves its state directory from `DSH_HOME` at construction time.
@@ -278,6 +280,139 @@ test('the remote persists updates and reports the effective values', async () =>
   assert.equal(engine.startRatio, 0.6)
   assert.equal(engine.maxFailures, 4)
   assert.match(updated.paths.settings, /config\.json$/)
+})
+
+/**
+ * Run one case against a private `DSH_HOME` so settings files never leak
+ * between tests.
+ * @param {(home: string) => Promise<void>} body - case body.
+ */
+async function withHome(body) {
+  const previous = process.env.DSH_HOME
+  const home = await mkdtemp(join(tmpdir(), 'dsh-bgc-case-'))
+  process.env.DSH_HOME = home
+  try {
+    await body(home)
+  } finally {
+    process.env.DSH_HOME = previous
+    await rm(home, { recursive: true, force: true })
+  }
+}
+
+test('YAML background values stay in force until the settings page writes them', async () => {
+  await withHome(async () => {
+    const engine = new BackgroundCompactionEngine(application().app, {
+      background: { startRatio: 0.6, maxFailures: 5 },
+    })
+    assert.equal(engine.startRatio, 0.6)
+    assert.equal(engine.maxFailures, 5)
+    await engine.settingsStore.update({ autoTriggerRatio: 0.7 })
+    assert.equal(engine.startRatio, 0.7, 'the settings file wins once it carries the key')
+    assert.equal(engine.maxFailures, 5, 'an untouched key keeps following YAML')
+  })
+})
+
+test('a settings file wins over YAML on load', async () => {
+  await withHome(async (home) => {
+    const directory = join(home, 'background-compaction')
+    await mkdir(directory, { recursive: true })
+    await writeFile(join(directory, 'config.json'), JSON.stringify({ autoTriggerRatio: 0.4 }), 'utf8')
+    const engine = new BackgroundCompactionEngine(application().app, { background: { startRatio: 0.9 } })
+    assert.equal(engine.startRatio, 0.4)
+  })
+})
+
+test('a busy swap keeps the summary for the next step boundary', async () => {
+  const { app } = application()
+  const engine = new BackgroundCompactionEngine(app, { auto: false })
+  const sessionValue = session()
+  const agent = agentFor(sessionValue)
+  const seqs = [1, 2]
+  const held = {
+    sessionId: sessionValue.id,
+    startSeq: 1,
+    endSeq: 2,
+    seqs,
+    fingerprint: fingerprint(buildSummarizationInput(sessionValue, seqs)),
+    target: { provider: 'deepseek', model: 'deepseek-v4' },
+    headSeq: sessionValue.surface.nodes[0],
+    result: { summary: [{ type: 'text', text: 'held' }], llmStreamCall: true, provider: 'deepseek', model: 'deepseek-v4' },
+    createdAt: Date.now(),
+    tailTokens: 0,
+    shadowedTokens: 0,
+    state: 'ready',
+    origin: 'auto',
+    abort: new AbortController(),
+  }
+  engine.held.set(sessionValue.id, held)
+  engine.compactRegion = async () => {
+    throw new ManualCompactionError('busy', 'compaction already in progress')
+  }
+  const result = await engine.compactIfNeeded(agent, 'pressure', new AbortController().signal)
+  assert.equal(result, null)
+  assert.equal(engine.held.get(sessionValue.id), held, 'a busy lock must not throw the summary away')
+})
+
+test('a compaction marker older than the session seed is stale, not a lock', async () => {
+  const { app } = application()
+  const engine = new BackgroundCompactionEngine(app, {})
+  const sessionValue = makeSession({
+    events: [
+      events.system(0, 'sys'),
+      events.user(1, 'turn 1'),
+      events.assistant(2, 'answer 1'),
+      events.user(3, 'turn 2'),
+      events.compactionStart(4),
+      events.endSeed(5),
+    ],
+  })
+  app.get('tokenMeter').measure = () => ({
+    totalTokens: 100_100,
+    surfaceTokens: 100_100,
+    nodes: sessionValue.surface.nodes.map((seq) => ({
+      seq,
+      tokens: seq === 3 ? 100 : seq >= 4 ? 0 : 50_000,
+    })),
+  })
+  const outcome = await engine.startManual(agentFor(sessionValue))
+  assert.equal(outcome.ok, true, 'a marker from a previous lifecycle must not lock the session')
+  await Promise.all([...engine.pending])
+})
+
+test('an open breaker probes once its cooldown has elapsed', async () => {
+  // A private home keeps the settings written by other cases out of this one.
+  await withHome(async () => {
+    const { app } = application()
+    const engine = new BackgroundCompactionEngine(app, { background: { failureCooldownMs: 1_000 } })
+    const sessionValue = makeSession({
+      events: [
+        events.system(0, 'sys'),
+        events.user(1, 'turn 1'),
+        events.assistant(2, 'answer 1'),
+        events.user(3, 'turn 2'),
+      ],
+    })
+    const weights = [2_000, 50_000, 8_000, 1_000]
+    app.get('tokenMeter').measure = () => ({
+      totalTokens: 61_000,
+      surfaceTokens: 61_000,
+      nodes: sessionValue.surface.nodes.map((seq) => ({ seq, tokens: weights[seq] })),
+    })
+    engine.lastRequestAt.set(sessionValue.id, Date.now())
+    engine.failures = 2
+    const agent = agentFor(sessionValue)
+    const signal = new AbortController().signal
+    const next = () => ({ kind: 'enter', messages: [] })
+
+    engine.lastFailureAt = Date.now()
+    await app.waterfall('agent/pre-step', { agent, signal }, next)
+    assert.equal(engine.held.get(sessionValue.id), undefined, 'the breaker is still open')
+
+    engine.lastFailureAt = Date.now() - 5_000
+    await app.waterfall('agent/pre-step', { agent, signal }, next)
+    assert.ok(engine.held.get(sessionValue.id) !== undefined, 'the probe starts a generation')
+    await Promise.all([...engine.pending])
+  })
 })
 
 test('registers /bcompact when the command service is present', async () => {

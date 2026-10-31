@@ -66,6 +66,14 @@ export const BACKGROUND_DEFAULTS = Object.freeze({
   maxSessions: 8,
   /** Consecutive failures before background generation stops. */
   maxFailures: 2,
+  /**
+   * Probe delay once the circuit breaker is open.
+   *
+   * The breaker is half-open: after this long, one generation attempt is allowed
+   * through. A successful generation resets the failure count, so the feature
+   * recovers on its own instead of staying off until the process restarts.
+   */
+  failureCooldownMs: 300_000,
 })
 
 const number = () => z.number()
@@ -93,6 +101,7 @@ const backgroundSchema = z.object({
   holdTtlMs: integer().min(0),
   maxSessions: integer().min(1),
   maxFailures: integer().min(0),
+  failureCooldownMs: integer().min(0),
 })
 
 /**
@@ -163,6 +172,9 @@ export function resolveBackground(background) {
   if (!Number.isSafeInteger(merged.maxFailures) || merged.maxFailures < 0) {
     fail('maxFailures', `must be a non-negative integer, received ${merged.maxFailures}`)
   }
+  if (!Number.isSafeInteger(merged.failureCooldownMs) || merged.failureCooldownMs < 0) {
+    fail('failureCooldownMs', `must be a non-negative integer, received ${merged.failureCooldownMs}`)
+  }
   if (merged.minShadowedRatio >= merged.startRatio) {
     fail('minShadowedRatio', `(${merged.minShadowedRatio}) must be below startRatio (${merged.startRatio})`)
   }
@@ -175,6 +187,7 @@ export function resolveBackground(background) {
     holdTtlMs: merged.holdTtlMs,
     maxSessions: merged.maxSessions,
     maxFailures: merged.maxFailures,
+    failureCooldownMs: merged.failureCooldownMs,
   })
 }
 

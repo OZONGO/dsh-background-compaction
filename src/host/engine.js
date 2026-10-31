@@ -27,6 +27,7 @@
  */
 
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+import { ManualCompactionError } from '@deepseek-ai/dsh-compaction'
 import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
 import { join } from 'node:path'
 
@@ -34,7 +35,7 @@ import { registerBcompact } from './command.js'
 import { Config, resolveBackground, splitConfig } from './config.js'
 import { HeldStore, heldInvalidReason } from './held.js'
 import { buildSummarizationInput, fingerprint, shortFingerprint } from './input.js'
-import { decideBackgroundStart, SKIP } from './policy.js'
+import { decideBackgroundPreconditions, decidePressureStart } from './policy.js'
 import { selectRange } from './range.js'
 import { describeSwap, writeSwapSnapshot } from './recorder.js'
 import { mountSettingsRemote } from './remote.js'
@@ -67,6 +68,15 @@ export function delegationDepthOf(agent) {
 }
 
 /**
+ * Whether a failure means "not now" rather than "this summary is wrong".
+ * @param {unknown} error - thrown value.
+ * @returns {boolean} `true` when the held summary should be kept.
+ */
+function isDeferred(error) {
+  return error instanceof ManualCompactionError && error.code === 'busy'
+}
+
+/**
  * Background compaction engine.
  *
  * Registered as `ctx.compaction`; it replaces `dsh-compaction-basic` rather than
@@ -87,6 +97,8 @@ export class BackgroundCompactionEngine extends BasicCompactionEngine {
   pending = new Set()
   /** Consecutive background failures. */
   failures = 0
+  /** Timestamp of the last background failure, for the half-open breaker. */
+  lastFailureAt = 0
   /** Last routed-request timestamp per session, for the cold-cache gate. */
   lastRequestAt = new Map()
   /** Cached model capacity per `provider/model`. */
@@ -95,6 +107,10 @@ export class BackgroundCompactionEngine extends BasicCompactionEngine {
   compactionState = new Map()
   /** Targets already warned about for unusable capacity. */
   warnedTargets = new Set()
+  /** Last skip reason logged per session, so steady states do not spam the log. */
+  skipReasons = new Map()
+  /** Ratio pair already warned about as unable to ever trigger. */
+  #ratioWarning
 
   /**
    * @param {object} ctx - owning Cordis context.
@@ -126,14 +142,26 @@ export class BackgroundCompactionEngine extends BasicCompactionEngine {
     )
   }
 
-  /** Effective background start ratio (settings override YAML). */
+  /**
+   * Effective background start ratio.
+   *
+   * The settings file wins only when it actually carries the key, so a YAML
+   * `background.startRatio` stays in force until the settings page writes it.
+   * @returns {number} ratio in (0,1).
+   */
   get startRatio() {
-    return this.settingsStore.get().autoTriggerRatio
+    const store = this.settingsStore
+    return store.has('autoTriggerRatio') ? store.get().autoTriggerRatio : this.background.startRatio
   }
 
-  /** Effective circuit-breaker limit (settings override YAML). */
+  /**
+   * Effective circuit-breaker limit, with the same precedence as
+   * {@link BackgroundCompactionEngine#startRatio}.
+   * @returns {number} non-negative failure count.
+   */
   get maxFailures() {
-    return this.settingsStore.get().maxFailures
+    const store = this.settingsStore
+    return store.has('maxFailures') ? store.get().maxFailures : this.background.maxFailures
   }
 
   /**
@@ -151,6 +179,29 @@ export class BackgroundCompactionEngine extends BasicCompactionEngine {
       summarizationProvider: pair.provider,
       summarizationModel: pair.model,
     })
+    this.#warnIfUnusable()
+  }
+
+  /**
+   * Warn when the effective ratios can never produce a start.
+   *
+   * `resolveBackground` validates the YAML pair, but the settings page can move
+   * the start ratio below `minShadowedRatio`; at that point every span is too
+   * small by construction and the feature would die without a symptom.
+   */
+  #warnIfUnusable() {
+    const ratio = this.startRatio
+    const floor = this.background.minShadowedRatio
+    if (floor < ratio) {
+      this.#ratioWarning = undefined
+      return
+    }
+    const key = `${floor}/${ratio}`
+    if (this.#ratioWarning === key) return
+    this.#ratioWarning = key
+    this.ctx.logger.warn(
+      `${LOG_PREFIX} minShadowedRatio (${floor}) is not below the effective start ratio (${ratio}); background generation cannot start`,
+    )
   }
 
   /** Register the lifecycle hooks this engine adds. */
@@ -184,6 +235,12 @@ export class BackgroundCompactionEngine extends BasicCompactionEngine {
         this.#noteCompaction(session, false)
         return
       }
+      if (event.type === 'session/end-seed') {
+        // A constructor-seed boundary proves any open marker belongs to an
+        // earlier process lifecycle: the lock is stale, not active.
+        this.compactionState.set(session.id, { active: false, initialized: true })
+        return
+      }
       if (event.type === 'request/header' || event.type === 'request/context' || event.type === 'assistant/message') {
         this.lastRequestAt.set(session.id, Date.now())
       }
@@ -198,6 +255,7 @@ export class BackgroundCompactionEngine extends BasicCompactionEngine {
       }
       this.lastRequestAt.delete(sessionId)
       this.compactionState.delete(sessionId)
+      this.skipReasons.delete(sessionId)
     })
     ctx.effect(
       () => () => {
@@ -238,6 +296,11 @@ export class BackgroundCompactionEngine extends BasicCompactionEngine {
 
   /**
    * Whether the session has an unmatched `compaction/start`.
+   *
+   * Mirrors the base engine's `assertCompactionInactive`: an opening marker that
+   * precedes the latest `session/end-seed` belongs to an earlier process
+   * lifecycle, so a crash mid-compaction does not disable the session forever.
+   *
    * @param {object} session - target session.
    * @returns {boolean} `true` while a compaction transaction is open.
    */
@@ -246,15 +309,24 @@ export class BackgroundCompactionEngine extends BasicCompactionEngine {
     if (state?.initialized === true) return state.active
     // First sighting (the plugin can attach to a live session): scan once.
     let active = false
+    let startSeq
+    let endSeedSeq
     const end = session.seq ?? 0
     for (let seq = 0; seq < end; seq += 1) {
       const event = session.eventAt(seq)
       if (event === undefined) continue
-      if (event.type === 'compaction/start') active = true
-      else if (event.type === 'compaction/end') active = false
+      if (event.type === 'compaction/start') {
+        active = true
+        startSeq = event.seq ?? seq
+      } else if (event.type === 'compaction/end') {
+        active = false
+      } else if (event.type === 'session/end-seed') {
+        endSeedSeq = event.seq ?? seq
+      }
     }
-    this.compactionState.set(session.id, { active, initialized: true })
-    return active
+    const locked = active && !(endSeedSeq !== undefined && startSeq !== undefined && endSeedSeq > startSeq)
+    this.compactionState.set(session.id, { active: locked, initialized: true })
+    return locked
   }
 
   /**
@@ -276,6 +348,29 @@ export class BackgroundCompactionEngine extends BasicCompactionEngine {
     const reserved = header?.config?.maxTokens ?? info.defaultMaxTokens ?? 0
     const policy = resolveTargetPolicy(this.config, target)
     return resolveCompactSpec(policy, info.contextWindow, reserved)
+  }
+
+  /**
+   * Log a skip reason once per state change.
+   *
+   * `agent/pre-step` runs on every step, so an unconditional line would turn a
+   * long generation into thousands of identical entries.
+   *
+   * @param {string} sessionId - session that was skipped.
+   * @param {string} reason - skip reason from the policy.
+   */
+  #noteSkip(sessionId, reason) {
+    if (this.skipReasons.get(sessionId) === reason) return
+    this.skipReasons.set(sessionId, reason)
+    this.ctx.logger.info(`${LOG_PREFIX} skip session=${sessionId} reason=${reason}`)
+  }
+
+  /**
+   * Age of the last background failure, for the half-open breaker.
+   * @returns {number} milliseconds, or `Infinity` when nothing ever failed.
+   */
+  #failureAgeMs() {
+    return this.lastFailureAt === 0 ? Number.POSITIVE_INFINITY : Date.now() - this.lastFailureAt
   }
 
   /**
@@ -303,8 +398,12 @@ export class BackgroundCompactionEngine extends BasicCompactionEngine {
    */
   async #swap(agent, held, signal) {
     const session = agent.session
-    const measurement = this.ctx.tokenMeter.measure(session)
     const target = routedTarget(session)
+    if (target === undefined) {
+      this.held.delete(session.id)
+      this.ctx.logger.info(`${LOG_PREFIX} discarded summary session=${session.id} reason=routed-target-changed`)
+      return { ok: false }
+    }
     let spec
     try {
       spec = await this.#specFor(session, target, signal)
@@ -315,6 +414,9 @@ export class BackgroundCompactionEngine extends BasicCompactionEngine {
       )
       return { ok: false }
     }
+    // Measure *after* the capacity lookup: this snapshot is what the invalidation
+    // rules and the commit itself will see.
+    const measurement = this.ctx.tokenMeter.measure(session)
     const reason = heldInvalidReason(held, {
       session,
       measurement,
@@ -332,6 +434,7 @@ export class BackgroundCompactionEngine extends BasicCompactionEngine {
       const result = await this.compactRegion(held.startSeq, held.endSeq, agent, signal)
       this.held.delete(session.id)
       this.failures = 0
+      this.lastFailureAt = 0
       const snapshot = describeSwap(session, result, held, {
         origin: held.origin,
         thresholdTokens: spec.thresholdTokens,
@@ -344,6 +447,15 @@ export class BackgroundCompactionEngine extends BasicCompactionEngine {
       )
       return { ok: true, result }
     } catch (error) {
+      // "Busy" means another compaction owns the lock and an aborted turn means
+      // the user cancelled: the summary is still correct, only the timing is
+      // wrong, so keep it for the next step boundary.
+      if (isDeferred(error) || signal?.aborted === true) {
+        this.ctx.logger.info(
+          `${LOG_PREFIX} swap deferred session=${session.id} reason=${isDeferred(error) ? 'compaction-busy' : 'aborted'}`,
+        )
+        return { ok: false }
+      }
       this.held.delete(session.id)
       this.ctx.logger.warn(
         `${LOG_PREFIX} swap failed session=${session.id}: ${error?.message ?? error}; falling back to threshold compaction`,
@@ -359,9 +471,22 @@ export class BackgroundCompactionEngine extends BasicCompactionEngine {
    */
   async #maybeStart(agent, signal) {
     const session = agent.session
-    if (this.held.get(session.id) !== undefined) return
     const target = routedTarget(session)
-    if (target === undefined) return
+    const blocked = decideBackgroundPreconditions({
+      delegationDepth: delegationDepthOf(agent),
+      auto: this.config.auto,
+      heldState: this.held.get(session.id)?.state,
+      locked: this.#compactionLocked(session),
+      failures: this.failures,
+      maxFailures: this.maxFailures,
+      failureAgeMs: this.#failureAgeMs(),
+      failureCooldownMs: this.background.failureCooldownMs,
+      hasTarget: target !== undefined,
+    })
+    if (blocked !== null) {
+      this.#noteSkip(session.id, blocked)
+      return
+    }
     let spec
     try {
       spec = await this.#specFor(session, target, signal)
@@ -373,30 +498,24 @@ export class BackgroundCompactionEngine extends BasicCompactionEngine {
       }
       return
     }
+    // The capacity lookup yields: a concurrent step may have started a summary
+    // for this session in the meantime, so re-check before spending a call.
+    if (this.held.get(session.id) !== undefined) return
     const measurement = this.ctx.tokenMeter.measure(session)
-    // Cheap early exit before the O(n) range scan: most steps sit far below the
-    // start ratio and this runs inside the pre-step waterfall.
-    if (measurement.totalTokens < spec.thresholdTokens * this.startRatio) return
-    const range = selectRange(session, measurement, spec, this.background)
-    const decision = decideBackgroundStart({
-      delegationDepth: delegationDepthOf(agent),
-      auto: this.config.auto,
-      heldState: undefined,
-      locked: this.#compactionLocked(session),
+    const gate = {
       totalTokens: measurement.totalTokens,
       thresholdTokens: spec.thresholdTokens,
       startRatio: this.startRatio,
-      failures: this.failures,
-      maxFailures: this.maxFailures,
-      hasRange: !('skip' in range),
       lastRequestAgeMs: Date.now() - (this.lastRequestAt.get(session.id) ?? 0),
       cacheWarmMs: this.background.cacheWarmMs,
-      hasTarget: true,
-    })
-    if (!decision.start) {
-      if (decision.reason !== SKIP.BELOW_START && decision.reason !== SKIP.DUE) {
-        this.ctx.logger.info(`${LOG_PREFIX} skip session=${session.id} reason=${decision.reason}`)
-      }
+    }
+    // Pressure and cache gates need no span: most steps sit far below the start
+    // ratio, and this runs inside the pre-step waterfall.
+    if (decidePressureStart({ ...gate, hasRange: true }) !== null) return
+    const range = selectRange(session, measurement, spec, this.background)
+    const reason = decidePressureStart({ ...gate, hasRange: !('skip' in range) })
+    if (reason !== null) {
+      this.#noteSkip(session.id, reason)
       return
     }
     this.startGeneration(agent, range, 'auto', spec)
@@ -434,6 +553,7 @@ export class BackgroundCompactionEngine extends BasicCompactionEngine {
       abort: new AbortController(),
     }
     this.held.set(session.id, held)
+    this.skipReasons.delete(session.id)
     this.ctx.logger.info(
       `${LOG_PREFIX} started session=${session.id} origin=${origin} range=${held.startSeq}-${held.endSeq} shadowed=~${range.shadowedTokens}t tail=~${range.tailTokens}t threshold=${spec.thresholdTokens} fp=${shortFingerprint(held.fingerprint)}`,
     )
@@ -443,6 +563,10 @@ export class BackgroundCompactionEngine extends BasicCompactionEngine {
         if (this.held.get(session.id) !== held) return
         held.result = result
         held.state = 'ready'
+        // A completed generation proves the route works, so the breaker closes
+        // here rather than only on a successful swap.
+        this.failures = 0
+        this.lastFailureAt = 0
         this.ctx.logger.info(
           `${LOG_PREFIX} held ready session=${session.id} origin=${origin} ms=${Date.now() - held.createdAt} usage=${JSON.stringify(result.usage ?? null)}`,
         )
@@ -452,6 +576,7 @@ export class BackgroundCompactionEngine extends BasicCompactionEngine {
         held.state = 'failed'
         this.held.delete(session.id)
         this.failures += 1
+        this.lastFailureAt = Date.now()
         this.ctx.logger.warn(
           `${LOG_PREFIX} held failed session=${session.id} origin=${origin} failures=${this.failures}/${this.maxFailures}: ${error?.message ?? error}`,
         )
@@ -488,6 +613,9 @@ export class BackgroundCompactionEngine extends BasicCompactionEngine {
     } catch {
       return { ok: false, reason: 'spec' }
     }
+    const pending = this.held.get(session.id)
+    if (pending?.state === 'ready') return { ok: true, already: 'ready' }
+    if (pending?.state === 'running') return { ok: false, reason: 'already-running' }
     const measurement = this.ctx.tokenMeter.measure(session)
     const range = selectRange(session, measurement, spec, this.background, {
       minShadowedTokens: MANUAL_MIN_SHADOWED_TOKENS,

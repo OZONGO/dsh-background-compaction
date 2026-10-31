@@ -47,6 +47,8 @@ test('resolveBackground rejects negative or fractional counters', () => {
   assert.throws(() => resolveBackground({ holdTtlMs: 1.5 }), /holdTtlMs/)
   assert.throws(() => resolveBackground({ maxSessions: 0 }), /maxSessions/)
   assert.throws(() => resolveBackground({ maxFailures: -1 }), /maxFailures/)
+  assert.throws(() => resolveBackground({ failureCooldownMs: -1 }), /failureCooldownMs/)
+  assert.throws(() => resolveBackground({ failureCooldownMs: 1.5 }), /failureCooldownMs/)
 })
 
 test('the schema declares every base key plus background', () => {

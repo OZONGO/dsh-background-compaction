@@ -82,6 +82,28 @@ test('a valid file overrides defaults and preserves unknown keys', async (t) => 
   assert.equal(store.extra.note, 'keep me')
 })
 
+test('has() reports only the keys the file actually carries', async (t) => {
+  const fixture = await temporaryDirectory()
+  t.after(fixture.cleanup)
+  await writeFile(join(fixture.directory, 'config.json'), JSON.stringify({ autoTriggerRatio: 0.5 }), 'utf8')
+  const store = new SettingsStore({ directory: fixture.directory })
+  assert.deepEqual(store.load(), { ok: true })
+  assert.equal(store.has('autoTriggerRatio'), true)
+  assert.equal(store.has('maxFailures'), false, 'an omitted key must keep following YAML')
+})
+
+test('an update pins only the keys it was given', async (t) => {
+  const fixture = await temporaryDirectory()
+  t.after(fixture.cleanup)
+  const store = new SettingsStore({ directory: fixture.directory })
+  store.load()
+  await store.update({ maxFailures: 3 })
+  assert.equal(store.has('maxFailures'), true)
+  assert.equal(store.has('autoTriggerRatio'), false)
+  const written = JSON.parse(await readFile(join(fixture.directory, 'config.json'), 'utf8'))
+  assert.deepEqual(Object.keys(written).sort(), ['$schema', 'maxFailures'])
+})
+
 test('update persists atomically, leaves no temp files, and notifies', async (t) => {
   const fixture = await temporaryDirectory()
   t.after(fixture.cleanup)

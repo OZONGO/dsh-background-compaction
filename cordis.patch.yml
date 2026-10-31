@@ -19,6 +19,7 @@
       config:
         background:
           # Fraction of thresholdTokens that starts background generation.
+          # The settings page overrides this once it writes autoTriggerRatio.
           startRatio: 0.85
           # Verbatim tail cap, also relative to thresholdTokens.
           tailRatio: 0.5
@@ -31,4 +32,8 @@
           # Sessions that may hold a summary at once.
           maxSessions: 8
           # Consecutive failures before background generation stops.
+          # The settings page overrides this once it writes maxFailures.
           maxFailures: 2
+          # Delay before the open breaker lets one probe through, so the feature
+          # recovers on its own instead of staying off until a restart.
+          failureCooldownMs: 300000

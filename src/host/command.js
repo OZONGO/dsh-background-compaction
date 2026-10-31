@@ -26,7 +26,6 @@ const REFUSAL = Object.freeze({
   'no-routed-target': 'No routed model yet · 尚无可用模型路由',
   'compaction-locked': 'A compaction is already running · 已有压缩在进行',
   'already-running': 'Background compaction is already running · 后台压缩已在进行',
-  'no-range': 'No compactable history yet · 没有可压缩的历史',
   'empty-surface': 'No compactable history yet · 没有可压缩的历史',
   'no-user-message': 'No compactable history yet · 没有可压缩的历史',
   'no-balanced-cut': 'No safe cut point (tool calls would be split) · 找不到安全的切分点',

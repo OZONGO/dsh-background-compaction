@@ -20,7 +20,7 @@ window.__ModuleLoader__.load({
     // Visible build stamp: the settings panel is the only surface that can tell
     // which client bundle the renderer actually loaded, and Electron keeps the
     // previous bundle until the window itself reloads.
-    const BUILD = 'b7'
+    const BUILD = 'b8'
     const NS = 'background-compaction'
 
     /* ------------------------------------------------------------------ */
@@ -37,6 +37,7 @@ window.__ModuleLoader__.load({
       model: '摘要模型',
       modelHint: '默认跟随当前对话正在使用的模型。',
       modelFollow: '跟随当前对话',
+      modelEffective: '实际生效',
       modelUnavailable: '模型目录不可用，请手动填写 provider 与 model。',
       provider: 'provider',
       modelId: 'model',
@@ -64,6 +65,7 @@ window.__ModuleLoader__.load({
       model: 'Summarization model',
       modelHint: 'Defaults to the model the conversation is currently using.',
       modelFollow: 'Follow the conversation',
+      modelEffective: 'In effect',
       modelUnavailable: 'Model catalog unavailable; enter provider and model manually.',
       provider: 'provider',
       modelId: 'model',
@@ -216,6 +218,9 @@ window.__ModuleLoader__.load({
 
       return function SettingsPage() {
         const [settings, setSettings] = useState(undefined)
+        // Values actually in force on the host: YAML may pin a summarization
+        // model while the stored pair still says "follow the conversation".
+        const [effective, setEffective] = useState(undefined)
         const [catalog, setCatalog] = useState(undefined)
         const [catalogFailed, setCatalogFailed] = useState(false)
         const [catalogError, setCatalogError] = useState('')
@@ -225,6 +230,9 @@ window.__ModuleLoader__.load({
         const [manualPair, setManualPair] = useState(undefined)
         const saveTimer = useRef(undefined)
         const mounted = useRef(true)
+        // Monotonic request id: a slow response must never overwrite the state a
+        // newer save already committed.
+        const saveSequence = useRef(0)
 
         useEffect(() => {
           mounted.current = true
@@ -241,6 +249,7 @@ window.__ModuleLoader__.load({
               const snapshot = unwrap(await api().get(), t('loadFailed'))
               if (cancelled) return
               setSettings(snapshot.settings)
+              setEffective(snapshot.effective)
               setSettingsFile(snapshot.paths?.settings ?? '')
             } catch (error) {
               if (!cancelled) setStatus({ tone: 'error', text: `${t('loadFailed')}: ${error?.message ?? error}` })
@@ -263,19 +272,24 @@ window.__ModuleLoader__.load({
 
         const commit = useCallback(
           async (patch) => {
+            const sequence = (saveSequence.current += 1)
             try {
               setStatus({ tone: 'busy', text: t('saving') })
               const snapshot = unwrap(await api().update(patch), t('saveFailed'))
-              if (!mounted.current) return
+              if (!mounted.current || sequence !== saveSequence.current) return
               setSettings(snapshot.settings)
+              setEffective(snapshot.effective)
               setStatus({ tone: 'ok', text: t('saved') })
             } catch (error) {
-              if (!mounted.current) return
+              if (!mounted.current || sequence !== saveSequence.current) return
               setStatus({ tone: 'error', text: `${t('saveFailed')}: ${error?.message ?? error}` })
               // Re-read so the UI never shows a value that failed to persist.
               try {
                 const snapshot = unwrap(await api().get(), t('loadFailed'))
-                if (mounted.current) setSettings(snapshot.settings)
+                if (mounted.current && sequence === saveSequence.current) {
+                  setSettings(snapshot.settings)
+                  setEffective(snapshot.effective)
+                }
               } catch {
                 /* keep the previous value */
               }
@@ -476,14 +490,43 @@ window.__ModuleLoader__.load({
                           return
                         }
                         const value = { provider, model }
+                        setManualPair(undefined)
                         setSettings({ ...settings, summarizationModel: value })
                         void commit({ summarizationModel: value })
                       },
                     },
                     t('apply'),
                   ),
+                  // Without the catalog there is no menu, so the "follow the
+                  // conversation" choice needs its own control.
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'bgc-select',
+                      style: { width: 'auto' },
+                      onClick: () => {
+                        const value = { provider: '', model: '' }
+                        setManualPair(undefined)
+                        setSettings({ ...settings, summarizationModel: value })
+                        void commit({ summarizationModel: value })
+                      },
+                    },
+                    t('modelFollow'),
+                  ),
                 )
-              : h('p', { className: 'bgc-hint' }, t('modelHint')),
+              : h(
+                  'div',
+                  { className: 'bgc-foot' },
+                  h('p', { className: 'bgc-hint' }, t('modelHint')),
+                  pair.provider.length === 0 && (effective?.summarizationProvider ?? '').length > 0
+                    ? h(
+                        'p',
+                        { className: 'bgc-hint' },
+                        `${t('modelEffective')}: ${effective.summarizationProvider} / ${effective.summarizationModel}`,
+                      )
+                    : null,
+                ),
           ),
           h(
             'div',

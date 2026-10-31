@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { decideBackgroundStart, SKIP } from '../src/host/policy.js'
+import { decideBackgroundPreconditions, decideBackgroundStart, decidePressureStart, SKIP } from '../src/host/policy.js'
 
 /** A decision input that starts. */
 const base = Object.freeze({
@@ -82,4 +82,35 @@ test('a disabled cache gate never vetoes', () => {
 
 test('the threshold wins over the start ratio when both apply', () => {
   assert.equal(decideBackgroundStart({ ...base, totalTokens: 90_000 }).reason, SKIP.DUE)
+})
+
+test('a zero failure limit disables background generation outright', () => {
+  assert.equal(decideBackgroundStart({ ...base, maxFailures: 0 }).reason, SKIP.CIRCUIT_OPEN)
+})
+
+test('the breaker is half-open: a probe is allowed after the cooldown', () => {
+  const open = { ...base, failures: 2, failureCooldownMs: 300_000 }
+  assert.equal(decideBackgroundStart({ ...open, failureAgeMs: 1_000 }).reason, SKIP.CIRCUIT_OPEN)
+  assert.deepEqual(decideBackgroundStart({ ...open, failureAgeMs: 300_000 }), { start: true })
+})
+
+test('the sync preconditions stand alone', () => {
+  assert.equal(decideBackgroundPreconditions(base), null)
+  assert.equal(decideBackgroundPreconditions({ ...base, delegationDepth: 2 }), SKIP.SUBAGENT)
+  assert.equal(decideBackgroundPreconditions({ ...base, locked: true }), SKIP.LOCKED)
+})
+
+test('the pressure gates stand alone', () => {
+  const pressure = {
+    totalTokens: 60_000,
+    thresholdTokens: 68_928,
+    startRatio: 0.85,
+    hasRange: true,
+    lastRequestAgeMs: 1_000,
+    cacheWarmMs: 300_000,
+  }
+  assert.equal(decidePressureStart(pressure), null)
+  assert.equal(decidePressureStart({ ...pressure, totalTokens: 10_000 }), SKIP.BELOW_START)
+  assert.equal(decidePressureStart({ ...pressure, hasRange: false }), SKIP.NO_RANGE)
+  assert.equal(decidePressureStart({ ...pressure, lastRequestAgeMs: 900_000 }), SKIP.COLD_CACHE)
 })

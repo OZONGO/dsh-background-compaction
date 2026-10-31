@@ -54,8 +54,13 @@ export function describeSwap(session, result, held, extras) {
     at: Date.now(),
     sessionId: session.id,
     origin: extras.origin,
-    range: { start: result.startSeq, end: result.endSeq },
-    shadowedTokens: result.shadowedTokenCount,
+    // `result.startSeq`/`endSeq` are the seqs of the `compaction/start` and
+    // `compaction/end` markers; the replaced surface span is `shadowedRange`.
+    range: { start: result.shadowedRange.start, end: result.shadowedRange.end },
+    // Route-priced span, the same unit as `tailTokens`. The engine's durable
+    // record uses heuristic pricing, so keep that value beside it.
+    shadowedTokens: held?.shadowedTokens ?? result.shadowedTokenCount,
+    shadowedTokenCount: result.shadowedTokenCount,
     summaryChars: Array.isArray(result.summary)
       ? result.summary.reduce((total, block) => total + (typeof block?.text === 'string' ? block.text.length : 0), 0)
       : 0,
@@ -86,6 +91,18 @@ export async function writeSwapSnapshot(directory, snapshot) {
     await handle.close()
     handle = undefined
     await rename(temporary, file)
+    // Best-effort directory sync, matching the settings writer: makes the rename
+    // itself durable. Windows refuses a directory handle, which is not worth
+    // surfacing for an evidence file.
+    let directoryHandle
+    try {
+      directoryHandle = await open(dirname(file), 'r')
+      await directoryHandle.sync()
+    } catch {
+      // ignore
+    } finally {
+      if (directoryHandle !== undefined) await directoryHandle.close().catch(() => {})
+    }
     return { ok: true, file }
   } catch (error) {
     if (handle !== undefined) await handle.close().catch(() => {})

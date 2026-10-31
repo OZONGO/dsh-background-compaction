@@ -110,7 +110,7 @@ pnpm add github:OZONGO/dsh-background-compaction
 |---|---|---|
 | 自动触发比例 | 0.1 – 0.99 | 达到 `thresholdTokens × 该值` 时启动后台生成，默认 0.85 |
 | 摘要模型 | provider / model，或"跟随当前对话" | 默认跟随当前对话的模型 |
-| 失败熔断次数 | 0 – 10 | 连续失败达到该值后停止后台生成，直到一次压缩成功 |
+| 失败熔断次数 | 0 – 10 | 连续失败达到该值后停止后台生成；冷却期（默认 5 分钟）后放行一次探针，成功即清零 |
 
 设置保存在 `~/.dsh/background-compaction/config.json`，可以直接手改：
 
@@ -123,7 +123,8 @@ pnpm add github:OZONGO/dsh-background-compaction
 }
 ```
 
-**优先级：设置文件 > YAML 配置 > 内置默认值。** `summarizationModel` 的空串对表示"跟随当前对话"。
+**优先级：设置文件 > YAML 配置 > 内置默认值。** 只有**文件里真正出现**的键才覆盖 YAML —— 设置页只写你改过的那一项，其余仍跟随 YAML。
+`summarizationModel` 的空串对表示"跟随当前对话"；此时设置页会显示 YAML 实际生效的模型。
 
 ---
 
@@ -145,8 +146,9 @@ pnpm add github:OZONGO/dsh-background-compaction
 ```json
 {
   "origin": "bcompact",
-  "range": { "start": 4, "end": 5 },
+  "range": { "start": 4, "end": 88 },
   "shadowedTokens": 41230,
+  "shadowedTokenCount": 40120,
   "tailTokens": 4310,
   "messages": [
     { "role": "system", "chars": 1180, "head": "You are a coding agent…" },
@@ -158,6 +160,9 @@ pnpm add github:OZONGO/dsh-background-compaction
 ```
 
 `messages` 来自提交**之后**的 `session.deriveMessages()`。因为 surface 是纯投影，这就是下一轮真正发出去的东西。
+
+> `range` 是**被替换的 surface 区间**（`result.shadowedRange`），不是 `compaction/start` 事件的 seq。
+> `shadowedTokens` 与 `tailTokens` 同量纲（按路由定价）；`shadowedTokenCount` 是引擎写进持久日志的启发式计数。
 
 日志关键字：
 
@@ -225,7 +230,9 @@ background-compaction: summarize miss …   指纹没命中，回退真实调用
 | 尾巴超过 `tailRatio × thresholdTokens` | 丢弃 |
 | 超过 `holdTtlMs` | 丢弃 |
 | 有未匹配的 `compaction/start` | 不启动新任务 |
-| 连续失败 ≥ 熔断次数 | 停止后台生成 |
+| 未匹配的 `compaction/start` 早于 `session/end-seed` | 上个进程生命周期的陈旧标记，**不算锁** |
+| 连续失败 ≥ 熔断次数 | 停止后台生成，直到 `failureCooldownMs` 后放行一次探针 |
+| 换入时别的压缩占着锁（`busy`） | 摘要保留，下一个回合边界再试 |
 
 另外：任何 `compaction/start`（包括 `/compact` 与 overflow 恢复）都会**立即中止**在飞的摘要任务。
 
@@ -244,13 +251,14 @@ background-compaction: summarize miss …   指纹没命中，回退真实调用
     # summarizationProvider, summarizationModel, maxTokens,
     # compactionRetries, maxOverflowRetries, modelPolicies, auto
     background:
-      startRatio: 0.85        # 设置页的“自动触发比例”覆盖它
+      startRatio: 0.85        # 设置页写入 autoTriggerRatio 之后才被覆盖
       tailRatio: 0.5          # 逐字尾巴上限（相对 thresholdTokens）
       minShadowedRatio: 0.1   # 被压缩区间的下限
       cacheWarmMs: 300000     # 冷缓存闸门：最近一次请求超过该值则不启动
       holdTtlMs: 900000       # 摘要最长存活
       maxSessions: 8          # 同时保留摘要的会话数
-      maxFailures: 2          # 设置页的“失败熔断次数”覆盖它
+      maxFailures: 2          # 设置页写入 maxFailures 之后才被覆盖
+      failureCooldownMs: 300000  # 熔断打开后多久放行一次探针（半开自愈）
 ```
 
 ### 6.2 子 agent
@@ -273,7 +281,7 @@ background-compaction: summarize miss …   指纹没命中，回退真实调用
 ## 8. 开发
 
 ```bash
-npm test          # 102 个用例：纯函数 + 真实 Cordis 上下文 + 真实 Session 换入
+npm test          # 116 个用例：纯函数 + 真实 Cordis 上下文 + 真实 Session 换入
 ```
 
 测试要点：

@@ -52,6 +52,7 @@ export const events = {
   }),
   compactionStart: (seq) => ({ seq, type: 'compaction/start', data: {} }),
   compactionEnd: (seq) => ({ seq, type: 'compaction/end', data: {} }),
+  endSeed: (seq) => ({ seq, type: 'session/end-seed', data: {} }),
 }
 
 /**
