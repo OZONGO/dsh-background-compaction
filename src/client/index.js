@@ -78,6 +78,49 @@ window.__ModuleLoader__.load({
     }
 
     /* ------------------------------------------------------------------ */
+    /* remote contribution                                                 */
+    /* ------------------------------------------------------------------ */
+
+    // The client gateway does not project host Typert registrations on its own:
+    // every client half mounts its own descriptor table with `$mount`, exactly
+    // like `dsh-ops` does. This table mirrors `src/host/remote.js`;
+    // `test/remote.test.js` keeps the two in sync.
+    const REMOTE_PACKAGE = 'dsh-background-compaction'
+    const REMOTE_NAMESPACE = 'backgroundCompaction'
+
+    const strictCodec = (name, parse) => ({
+      mode: 'strict',
+      typeSymbol: `${REMOTE_PACKAGE}#${name}`,
+      create: () => ({ parse }),
+    })
+
+    const RESULT_CODEC = strictCodec('SettingsResult', (value) => value)
+    const PATCH_CODEC = strictCodec('SettingsPatch', (value) =>
+      value === undefined || value === null ? {} : value,
+    )
+
+    const remoteDescriptor = (method, parameter) => ({
+      id: `${REMOTE_PACKAGE}#${REMOTE_NAMESPACE}/${method}`,
+      service: REMOTE_NAMESPACE,
+      namespace: REMOTE_NAMESPACE,
+      method,
+      invocation: { kind: 'direct' },
+      result: RESULT_CODEC,
+      parameters:
+        parameter === undefined
+          ? []
+          : [{ name: parameter.wire, wire: parameter.wire, source: 'json', codec: parameter.codec }],
+    })
+
+    const REMOTE_CONTRIBUTION = Object.freeze({
+      package: REMOTE_PACKAGE,
+      descriptors: Object.freeze([
+        remoteDescriptor('get'),
+        remoteDescriptor('update', { wire: 'patch', codec: PATCH_CODEC }),
+      ]),
+    })
+
+    /* ------------------------------------------------------------------ */
     /* styles                                                              */
     /* ------------------------------------------------------------------ */
 
@@ -159,8 +202,15 @@ window.__ModuleLoader__.load({
      * @param {object} ctx - client plugin context.
      * @returns {Function} React component.
      */
-    function makeSettingsPage(ctx) {
+    function makeSettingsPage(ctx, mountError) {
       const t = ctx.locale.bind(NS)
+      const api = () => {
+        const namespace = ctx.remote?.backgroundCompaction
+        if (namespace === undefined) {
+          throw new Error(mountError?.message ?? 'settings remote is not mounted')
+        }
+        return namespace
+      }
 
       return function SettingsPage() {
         const [settings, setSettings] = useState(undefined)
@@ -185,7 +235,7 @@ window.__ModuleLoader__.load({
           let cancelled = false
           ;(async () => {
             try {
-              const snapshot = unwrap(await ctx.remote.backgroundCompaction.get(), t('loadFailed'))
+              const snapshot = unwrap(await api().get(), t('loadFailed'))
               if (cancelled) return
               setSettings(snapshot.settings)
               setSettingsFile(snapshot.paths?.settings ?? '')
@@ -210,7 +260,7 @@ window.__ModuleLoader__.load({
           async (patch) => {
             try {
               setStatus({ tone: 'busy', text: t('saving') })
-              const snapshot = unwrap(await ctx.remote.backgroundCompaction.update(patch), t('saveFailed'))
+              const snapshot = unwrap(await api().update(patch), t('saveFailed'))
               if (!mounted.current) return
               setSettings(snapshot.settings)
               setStatus({ tone: 'ok', text: t('saved') })
@@ -219,7 +269,7 @@ window.__ModuleLoader__.load({
               setStatus({ tone: 'error', text: `${t('saveFailed')}: ${error?.message ?? error}` })
               // Re-read so the UI never shows a value that failed to persist.
               try {
-                const snapshot = unwrap(await ctx.remote.backgroundCompaction.get(), t('loadFailed'))
+                const snapshot = unwrap(await api().get(), t('loadFailed'))
                 if (mounted.current) setSettings(snapshot.settings)
               } catch {
                 /* keep the previous value */
@@ -477,11 +527,20 @@ window.__ModuleLoader__.load({
     /**
      * @param {object} ctx - client plugin context.
      */
-    function apply(ctx) {
+    async function apply(ctx) {
       const t = ctx.locale.bind(NS)
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'background-compaction: dictionaries')
       ctx.effect(() => installStyles(), 'background-compaction: styles')
-      const SettingsPage = makeSettingsPage(ctx)
+      // Mount the namespace before the page can render; a failure is surfaced in
+      // the page instead of removing it.
+      let mountError
+      try {
+        await ctx.remote.$mount(REMOTE_CONTRIBUTION)
+      } catch (error) {
+        mountError = error
+        console.warn('[dsh-background-compaction] settings remote mount failed', error)
+      }
+      const SettingsPage = makeSettingsPage(ctx, mountError)
       ctx.slots.inject('settings.section', () =>
         ctx.slots.register(
           {
