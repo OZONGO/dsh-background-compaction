@@ -17,6 +17,10 @@ window.__ModuleLoader__.load({
     const h = React.createElement
 
     const NAME = 'dsh-background-compaction'
+    // Visible build stamp: the settings panel is the only surface that can tell
+    // which client bundle the renderer actually loaded, and Electron keeps the
+    // previous bundle until the window itself reloads.
+    const BUILD = 'b3'
     const NS = 'background-compaction'
 
     /* ------------------------------------------------------------------ */
@@ -515,6 +519,7 @@ window.__ModuleLoader__.load({
             settingsFile.length > 0
               ? h('div', null, t('fileHint'), h('div', { className: 'bgc-mono' }, settingsFile))
               : null,
+            h('div', { className: 'bgc-mono' }, `build ${BUILD}`),
           ),
         )
       }
