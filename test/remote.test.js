@@ -48,6 +48,17 @@ test('the client mounts the same package identity', () => {
   assert.match(CLIENT_SOURCE, /ctx\.remote\.\$mount\(REMOTE_CONTRIBUTION\)/)
 })
 
+test('the client resolves the mounted namespace without a static inject entry', () => {
+  // `ctx.remote.<ns>` is a Cordis service accessor that requires `remote.<ns>`
+  // in the plugin's static inject table — impossible here, because this very
+  // plugin is what mounts the namespace. `ctx.get()` resolves the same instance
+  // without that declaration (verified against Cordis: nested Service accessors
+  // throw `cannot get property ... without inject`, `ctx.get` does not).
+  assert.match(CLIENT_SOURCE, /const REMOTE_SERVICE = `remote\.\$\{REMOTE_NAMESPACE\}`/)
+  assert.match(CLIENT_SOURCE, /ctx\.get\(REMOTE_SERVICE\)/)
+  assert.doesNotMatch(CLIENT_SOURCE, /ctx\.remote\?\.backgroundCompaction/)
+})
+
 test('the client bundle is a ModuleLoader factory with the plugin exports', () => {
   assert.match(CLIENT_SOURCE, /window\.__ModuleLoader__\.load\(\{/)
   assert.match(CLIENT_SOURCE, /id: 'dsh-background-compaction'/)

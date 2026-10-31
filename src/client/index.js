@@ -91,6 +91,8 @@ window.__ModuleLoader__.load({
     // `test/remote.test.js` keeps the two in sync.
     const REMOTE_PACKAGE = 'dsh-background-compaction'
     const REMOTE_NAMESPACE = 'backgroundCompaction'
+    /** Cordis service name of the mounted namespace. */
+    const REMOTE_SERVICE = `remote.${REMOTE_NAMESPACE}`
 
     const strictCodec = (name, parse) => ({
       mode: 'strict',
@@ -208,8 +210,12 @@ window.__ModuleLoader__.load({
      */
     function makeSettingsPage(ctx, mountError) {
       const t = ctx.locale.bind(NS)
+      // `ctx.remote.<namespace>` is a Cordis service accessor and requires
+      // `remote.<namespace>` in this plugin's static `inject` table — which is a
+      // chicken-and-egg here, because this very plugin mounts the namespace.
+      // `ctx.get()` resolves the same instance without that declaration.
       const api = () => {
-        const namespace = ctx.remote?.backgroundCompaction
+        const namespace = ctx.get(REMOTE_SERVICE)
         if (namespace === undefined) {
           throw new Error(mountError?.message ?? 'settings remote is not mounted')
         }
