@@ -133,9 +133,12 @@ pnpm add github:OZONGO/dsh-background-compaction
 
 | 步 | 操作 | 期望 |
 |---|---|---|
-| 1 | 新会话，做 2–3 轮短对话 | 正常 |
+| 1 | 新会话，做 2–3 轮对话（读一个文件就够，总量几百到几千 token） | 正常 |
 | 2 | 输入 `/bcompact 继续` | **立即**得到回答；日志出现 `held ready` |
 | 3 | 再发一条消息 | 该轮 `pre-step` 提交摘要；日志出现 `swap hit`；生成 `last-swap.json` |
+
+> `/bcompact` 需要一个**非空且平衡**的可压缩区间（绝对下限 512 token）；历史太短会返回"历史太短，压缩没有意义"。
+> 自动路径的门槛更高：被压缩区间至少是 `thresholdTokens` 的 10%（200k 窗口约 6.9k token）。
 
 证据文件 `~/.dsh/background-compaction/last-swap.json`：
 

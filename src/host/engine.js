@@ -45,6 +45,16 @@ import { resolveCompactSpec, resolveTargetPolicy, routedTarget } from './spec.js
 export const LOG_PREFIX = 'background-compaction:'
 
 /**
+ * Absolute usefulness floor for a user-requested `/bcompact`.
+ *
+ * The automatic path uses a threshold-relative floor (10% of ~68928 tokens on a
+ * 200k window) because compacting a tiny span there is pure waste. A manual
+ * request is different: the user asked for it, so only a span too small to
+ * produce a smaller summary than it replaces is refused.
+ */
+export const MANUAL_MIN_SHADOWED_TOKENS = 512
+
+/**
  * Resolve the delegation depth of an agent without importing the subagent
  * package: a top-level agent is depth 0.
  * @param {object} agent - agent loop instance.
@@ -364,6 +374,9 @@ export class BackgroundCompactionEngine extends BasicCompactionEngine {
       return
     }
     const measurement = this.ctx.tokenMeter.measure(session)
+    // Cheap early exit before the O(n) range scan: most steps sit far below the
+    // start ratio and this runs inside the pre-step waterfall.
+    if (measurement.totalTokens < spec.thresholdTokens * this.startRatio) return
     const range = selectRange(session, measurement, spec, this.background)
     const decision = decideBackgroundStart({
       delegationDepth: delegationDepthOf(agent),
@@ -476,7 +489,9 @@ export class BackgroundCompactionEngine extends BasicCompactionEngine {
       return { ok: false, reason: 'spec' }
     }
     const measurement = this.ctx.tokenMeter.measure(session)
-    const range = selectRange(session, measurement, spec, this.background)
+    const range = selectRange(session, measurement, spec, this.background, {
+      minShadowedTokens: MANUAL_MIN_SHADOWED_TOKENS,
+    })
     if ('skip' in range) return { ok: false, reason: range.skip }
     this.startGeneration(agent, range, 'bcompact', spec)
     return { ok: true, range }

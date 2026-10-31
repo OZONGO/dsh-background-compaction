@@ -203,6 +203,23 @@ test('startManual starts generation and reports the chosen span', async () => {
   assert.equal(calls.length, 1)
 })
 
+test('startManual accepts a span the automatic floor would refuse', async () => {
+  const { app } = application()
+  const engine = new BackgroundCompactionEngine(app, {})
+  const sessionValue = session()
+  // 700 tokens of compactable history: below 10% of the 68928-token threshold,
+  // but above the absolute manual floor, so `/bcompact` must accept it.
+  app.get('tokenMeter').measure = () => ({
+    totalTokens: 800,
+    surfaceTokens: 800,
+    nodes: sessionValue.surface.nodes.map((seq) => ({ seq, tokens: seq === 3 ? 100 : 350 })),
+  })
+  const outcome = await engine.startManual(agentFor(sessionValue))
+  assert.equal(outcome.ok, true)
+  assert.deepEqual(outcome.range.seqs, [1, 2])
+  await Promise.all([...engine.pending])
+})
+
 test('settings changes are applied live to the summarization route', async () => {
   const { app, calls } = application()
   const engine = new BackgroundCompactionEngine(app, {})

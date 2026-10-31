@@ -131,9 +131,12 @@ No long conversation required — three steps:
 
 | Step | Action | Expected |
 |---|---|---|
-| 1 | New session, 2–3 short turns | Normal |
+| 1 | New session, 2–3 turns (reading one file is plenty — a few hundred to a few thousand tokens) | Normal |
 | 2 | Type `/bcompact keep going` | Answer arrives **immediately**; log shows `held ready` |
 | 3 | Send another message | That turn commits the summary at `pre-step`; log shows `swap hit`; `last-swap.json` appears |
+
+> `/bcompact` needs a **non-empty, balanced** compactable span (absolute floor 512 tokens); with less history it answers "not enough history to compact".
+> The automatic path has a higher floor: the summarized span must be at least 10% of `thresholdTokens` (~6.9k tokens on a 200k window).
 
 Evidence file `~/.dsh/background-compaction/last-swap.json`:
 

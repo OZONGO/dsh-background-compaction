@@ -53,9 +53,12 @@ function sumTokens(seqs, tokens) {
  * @param {object} measurement - measured token counts.
  * @param {{thresholdTokens: number}} spec - resolved token budgets.
  * @param {{tailRatio: number, minShadowedRatio: number}} background - background policy.
+ * @param {{minShadowedTokens?: number}} [options] - override the usefulness floor; a manual
+ *   `/bcompact` uses an absolute floor instead of the threshold-relative one, because the user
+ *   asked for a compaction of whatever history exists.
  * @returns {{start: number, end: number, seqs: number[], shadowedTokens: number, tailTokens: number} | {skip: string}} range or a skip reason.
  */
-export function selectRange(session, measurement, spec, background) {
+export function selectRange(session, measurement, spec, background, options = {}) {
   const nodes = session.surface.nodes
   if (!Array.isArray(nodes) || nodes.length < 2) return { skip: RANGE_SKIP.EMPTY }
 
@@ -84,7 +87,11 @@ export function selectRange(session, measurement, spec, background) {
   const shadowedTokens = sumTokens(shadowedSeqs, tokens)
 
   if (tailTokens > spec.thresholdTokens * background.tailRatio) return { skip: RANGE_SKIP.TAIL_TOO_LONG }
-  if (shadowedTokens < spec.thresholdTokens * background.minShadowedRatio) return { skip: RANGE_SKIP.TOO_SMALL }
+  const floor =
+    options.minShadowedTokens === undefined
+      ? spec.thresholdTokens * background.minShadowedRatio
+      : options.minShadowedTokens
+  if (shadowedTokens < floor) return { skip: RANGE_SKIP.TOO_SMALL }
 
   return {
     start: nodes[startIndex],
